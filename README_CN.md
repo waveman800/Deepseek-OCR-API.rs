@@ -214,6 +214,104 @@ cargo run -p deepseek-ocr-server --release -- \
 - 无论使用哪种 GPU，推荐 `cargo build --release -p deepseek-ocr-cli --features metal|cuda` 以获取更高吞吐。
 - 结合 `--max-new-tokens`、`--crop-mode` 等参数可在延迟与质量之间做权衡。
 
+## Docker 构建与运行（CUDA 12.1 + Ubuntu 22.04 + RTX 4090）
+
+```bash
+cd /home/lxn/dev/deepseek-ocr.rs
+
+sudo docker build \
+  --build-arg CUDA_VERSION=12.1.1 \
+  --build-arg UBUNTU_VERSION=22.04 \
+  --build-arg CUDA_COMPUTE_CAP=89 \    # 4090
+  -t deepseek-ocr-rs:cuda-12.1-ubuntu22.04 \
+  -f Dockerfile .
+
+sudo docker run -d --name deepseek-ocr --gpus all \
+  -p 8000:8000 \
+  --shm-size=1G \
+  -v /home/lxn/dev/DeepSeek-OCR-vllm-service/models/DeepSeek-OCR:/models/deepseek-ocr \
+  deepseek-ocr-rs:cuda-12.1-ubuntu22.04 \
+  --model deepseek-ocr \
+  --weights /models/deepseek-ocr/model-00001-of-000001.safetensors \
+  --tokenizer /models/deepseek-ocr/tokenizer.json \
+  --model-config /models/deepseek-ocr/config.json \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device cuda \
+  --max-new-tokens 512
+```
+
+注意：
+- 4090 的 Compute Capability 为 89；如需其他显卡，请替换 `CUDA_COMPUTE_CAP`。
+- 若 `CUDA_VERSION=12.1.1` 拉取失败，可尝试 `12.1.0` 或对应的 `-base/-devel` 标签。
+- 运行时需启用宿主机的 NVIDIA Container Toolkit（或 snap 版 Docker 的 nvidia runtime），确保 `docker run --gpus all` 可用。
+- 镜像的 `ENTRYPOINT` 已设为 `deepseek-ocr-server`，`docker run` 时只需传参数，不要重复可执行名。
+
+## PaddleOCR‑VL 使用示例（HTTP 请求）
+
+- 切换模型：将启动参数或 HTTP 请求中的 `model` 设为 `paddleocr-vl`。若不显式指定权重/配置/分词器路径，服务会在首次请求时自动下载并缓存所需资产。
+- 资源占用更低、启动更快，适合轻量部署与批处理场景。
+
+启动服务（Docker 示例，使用 GPU，自动下载模型资产）：
+```bash
+sudo docker run -d --name paddleocr-vl --gpus all \
+  -p 8001:8000 \
+  --shm-size=1G \
+  deepseek-ocr-rs:cuda-12.1-ubuntu22.04 \
+  --model paddleocr-vl \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device cuda \
+  --max-new-tokens 512
+```
+
+HTTP 请求（OpenAI 兼容 `/v1/chat/completions`）：
+```bash
+# 将图片转成 data URL（示例）
+b64=$(base64 -w0 sample.png)
+echo "data:image/png;base64,$b64" > img.dataurl
+
+# 发送请求
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "paddleocr-vl",
+    "max_tokens": 512,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "请将图片内容转为结构化 Markdown。" },
+          { "type": "image_url", "image_url": { "url": "'"$(cat img.dataurl)"'" } }
+        ]
+      }
+    ]
+  }'
+```
+
+可选：使用 `/v1/responses` 路由
+```bash
+curl -X POST http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "paddleocr-vl",
+    "max_output_tokens": 512,
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "input_text", "text": "将图片转换为 Markdown。" },
+          { "type": "input_image", "image_url": "'"$(cat img.dataurl)"'" }
+        ]
+      }
+    ]
+  }'
+```
+
+注意：
+- 多页 PDF 请先转成多张图片，然后在同一条消息中传多个 image 段；或分批请求后在客户端合并。
+- 若响应被截断，调大 `max_tokens`/`max_output_tokens`；若请求体过大，可降低图片分辨率或分批上传。
+
 ## 目录结构 🗂️
 
 - `crates/core`：推理管线、模型装载、会话模板。
